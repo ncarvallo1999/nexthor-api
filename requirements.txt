@@ -1,0 +1,8 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pandas==2.1.4
+plotly==5.17.0
+python-multipart==0.0.6
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9  # For Supabase Postgres later; skip if SQLite only
+requests==2.31.0
