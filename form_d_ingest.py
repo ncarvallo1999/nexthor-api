@@ -34,10 +34,9 @@ class Filing(Base):
 Base.metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
 
-# --- HARDCODED USER AGENT (The Fix) ---
-# We force this exactly as SEC wants it: "AppName <Email>"
+# --- UPDATED HEADERS (Trying a more standard browser format) ---
 HEADERS = {
-    'User-Agent': 'NexthorAi <nestorcarvallo.jr@gmail.com>',
+    'User-Agent': 'NexthorData/1.0 (nestorcarvallo.jr@gmail.com)',
     'Accept-Encoding': 'gzip, deflate',
     'Host': 'www.sec.gov'
 }
@@ -50,7 +49,8 @@ def parse_index_lines(lines):
     entries = []
     for line in lines[11:]: 
         parts = [p.strip() for p in line.split('|') if p.strip()]
-        if len(parts) == 5 and parts[2] == 'D':
+        # Logic: Must have 5 parts. Part 2 is Form Type. We accept 'D' and 'D/A' (Amendments)
+        if len(parts) == 5 and (parts[2] == 'D' or parts[2] == 'D/A'):
             cik = parts[0].zfill(10)
             company_name = parts[1]
             filing_date_str = parts[3]
@@ -125,31 +125,33 @@ def insert_if_new(session, data):
 def process_daily(session, year, quarter, date_str):
     url = get_daily_idx_url(year, quarter, date_str)
     print(f"📥 Fetching SEC Index: {url}")
-    resp = requests.get(url, headers=HEADERS)
     
-    # --- DEBUG SECTION: TELL ME WHAT THE SEC SAID ---
-    if resp.status_code == 200:
-        lines = resp.text.splitlines()
+    try:
+        resp = requests.get(url, headers=HEADERS)
         
-        # Check if we are blocked (HTML instead of Data)
-        if len(lines) > 0 and "<html" in lines[0].lower():
-            print("\n❌ BLOCKED BY SEC. RESPONSE CONTENT:")
-            for l in lines[:10]: # Print first 10 lines of error
-                print(l)
-            print("----------------------------------\n")
-            return
+        # --- X-RAY VISION: PRINT WHAT WE RECEIVED ---
+        print(f"📡 Server Status: {resp.status_code}")
+        print("--- START OF SERVER RESPONSE (First 300 chars) ---")
+        print(resp.text[:300])
+        print("--- END OF PREVIEW ---")
+        # -------------------------------------------
 
-        entries = parse_index_lines(lines)
-        print(f"🔎 Found {len(entries)} Form D entries. Processing...")
-        count = 0
-        for entry in entries:
-            data = download_and_parse_xml(entry['cik'], entry['accession'], entry['filename'])
-            if data and insert_if_new(session, data):
-                count += 1
-            time.sleep(0.15) 
-        print(f"🚀 Batch Complete: Added {count} new leads.")
-    else:
-        print(f"❌ Index not found (Status {resp.status_code}).")
+        if resp.status_code == 200:
+            lines = resp.text.splitlines()
+            entries = parse_index_lines(lines)
+            print(f"🔎 Found {len(entries)} Form D entries. Processing...")
+            count = 0
+            for entry in entries:
+                data = download_and_parse_xml(entry['cik'], entry['accession'], entry['filename'])
+                if data and insert_if_new(session, data):
+                    count += 1
+                time.sleep(0.15) 
+            print(f"🚀 Batch Complete: Added {count} new leads.")
+        else:
+            print(f"❌ Failed to download index.")
+            
+    except Exception as e:
+        print(f"🔥 Download Error: {e}")
 
 def daily_update():
     session = SessionLocal()
