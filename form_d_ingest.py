@@ -5,9 +5,8 @@ import re
 import time
 import requests
 import xml.etree.ElementTree as ET
-from sqlalchemy import create_engine, Column, Integer, String, Date, Boolean, UniqueConstraint, text
+from sqlalchemy import create_engine, Column, Integer, String, Date, Boolean, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.exc import IntegrityError
 
 # DB setup
 DB_URL = os.getenv('DB_URL')
@@ -15,10 +14,8 @@ if not DB_URL:
     print("⚠️ No DB_URL found. Using local SQLite.")
     DB_URL = 'sqlite:///reg_d_treasure.db'
 elif "postgres" in DB_URL and "sslmode" not in DB_URL:
-     # Patch for likely Render config misses, though we fixed this in Env Vars
      pass
 
-# Robust connection for Cron (Pool Pre-Ping)
 engine = create_engine(DB_URL, pool_pre_ping=True)
 Base = declarative_base()
 
@@ -34,12 +31,16 @@ class Filing(Base):
     ai_score = Column(Integer, default=0)
     __table_args__ = (UniqueConstraint('cik', 'filing_date', name='unique_cik_date'),)
 
-# Ensure tables exist
 Base.metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
 
-# USER AGENT - CRITICAL FOR SEC
-HEADERS = {'User-Agent': os.getenv('EDGAR_USER_AGENT', 'NestorCarvallo nestorcarvallo.jr@gmail.com')}
+# --- HARDCODED USER AGENT (The Fix) ---
+# We force this exactly as SEC wants it: "AppName <Email>"
+HEADERS = {
+    'User-Agent': 'NexthorAi <nestorcarvallo.jr@gmail.com>',
+    'Accept-Encoding': 'gzip, deflate',
+    'Host': 'www.sec.gov'
+}
 NS = {'d': 'http://www.sec.gov/edgar/formd'}
 
 def get_daily_idx_url(year, quarter, date_str):
@@ -47,9 +48,8 @@ def get_daily_idx_url(year, quarter, date_str):
 
 def parse_index_lines(lines):
     entries = []
-    for line in lines[11:]: # Skip SEC header
+    for line in lines[11:]: 
         parts = [p.strip() for p in line.split('|') if p.strip()]
-        # We only want Form D
         if len(parts) == 5 and parts[2] == 'D':
             cik = parts[0].zfill(10)
             company_name = parts[1]
@@ -78,7 +78,6 @@ def download_and_parse_xml(cik, accession, primary_doc):
             parsed = parse_form_d_xml(resp.content, url)
             parsed['cik'] = cik
             return parsed
-        print(f"⚠️ Download fail {resp.status_code}: {url}")
         return None
     except Exception as e:
         print(f"⚠️ Network error: {e}")
@@ -94,7 +93,7 @@ def parse_form_d_xml(xml_content, raw_url):
         company_elem = root.find('.//d:companyName', NS)
         company_name = company_elem.text.strip() if company_elem is not None else ''
         
-        min_inv_elem = root.find('.//d:totalOfferingAmount', NS) # Changed to totalOffering or minimum
+        min_inv_elem = root.find('.//d:totalOfferingAmount', NS)
         if min_inv_elem is None:
              min_inv_elem = root.find('.//d:minimumInvestment', NS)
         
@@ -107,7 +106,6 @@ def parse_form_d_xml(xml_content, raw_url):
 def insert_if_new(session, data):
     if not data.get('filing_date') or not data.get('cik'):
         return False
-    # Check duplicate
     existing = session.query(Filing).filter_by(cik=data['cik'], filing_date=data['filing_date']).first()
     if not existing:
         new_filing = Filing(
@@ -117,7 +115,7 @@ def insert_if_new(session, data):
             filing_date=data['filing_date'],
             processed=False,
             raw_xml_url=data.get('raw_xml_url', ''),
-            ai_score=0 # Default, will be scored later
+            ai_score=0 
         )
         session.add(new_filing)
         print(f"✅ Inserted: {data['company_name']} - {data['raise_amount']}")
@@ -128,8 +126,19 @@ def process_daily(session, year, quarter, date_str):
     url = get_daily_idx_url(year, quarter, date_str)
     print(f"📥 Fetching SEC Index: {url}")
     resp = requests.get(url, headers=HEADERS)
+    
+    # --- DEBUG SECTION: TELL ME WHAT THE SEC SAID ---
     if resp.status_code == 200:
         lines = resp.text.splitlines()
+        
+        # Check if we are blocked (HTML instead of Data)
+        if len(lines) > 0 and "<html" in lines[0].lower():
+            print("\n❌ BLOCKED BY SEC. RESPONSE CONTENT:")
+            for l in lines[:10]: # Print first 10 lines of error
+                print(l)
+            print("----------------------------------\n")
+            return
+
         entries = parse_index_lines(lines)
         print(f"🔎 Found {len(entries)} Form D entries. Processing...")
         count = 0
@@ -137,21 +146,19 @@ def process_daily(session, year, quarter, date_str):
             data = download_and_parse_xml(entry['cik'], entry['accession'], entry['filename'])
             if data and insert_if_new(session, data):
                 count += 1
-            time.sleep(0.15) # Polite throttle
+            time.sleep(0.15) 
         print(f"🚀 Batch Complete: Added {count} new leads.")
     else:
-        print(f"❌ Index not found (Status {resp.status_code}). Weekend or Holiday?")
+        print(f"❌ Index not found (Status {resp.status_code}).")
 
 def daily_update():
     session = SessionLocal()
     try:
-        # Check for Manual Override via Env Var (Good for testing)
         test_date_str = os.getenv('TEST_DATE') 
         if test_date_str:
             print(f"🧪 TEST MODE: Using {test_date_str}")
             target_date = datetime.datetime.strptime(test_date_str, '%Y-%m-%d').date()
         else:
-            # Default: Yesterday
             target_date = datetime.date.today() - datetime.timedelta(days=1)
         
         year = target_date.year
@@ -168,5 +175,4 @@ def daily_update():
         session.close()
 
 if __name__ == "__main__":
-    # If run directly by Cron
     daily_update()
