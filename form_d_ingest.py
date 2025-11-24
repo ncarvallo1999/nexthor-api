@@ -34,7 +34,7 @@ class Filing(Base):
 Base.metadata.create_all(engine)
 SessionLocal = sessionmaker(bind=engine)
 
-# --- UPDATED HEADERS (Trying a more standard browser format) ---
+# HEADERS
 HEADERS = {
     'User-Agent': 'NexthorData/1.0 (nestorcarvallo.jr@gmail.com)',
     'Accept-Encoding': 'gzip, deflate',
@@ -47,23 +47,36 @@ def get_daily_idx_url(year, quarter, date_str):
 
 def parse_index_lines(lines):
     entries = []
-    for line in lines[11:]: 
-        parts = [p.strip() for p in line.split('|') if p.strip()]
-        # Logic: Must have 5 parts. Part 2 is Form Type. We accept 'D' and 'D/A' (Amendments)
-        if len(parts) == 5 and (parts[2] == 'D' or parts[2] == 'D/A'):
-            cik = parts[0].zfill(10)
-            company_name = parts[1]
-            filing_date_str = parts[3]
-            filename = parts[4]
-            path_match = re.match(r'Archives/edgar/data/(\d+)/(\S+)/(\S+)', filename)
+    print(f"DEBUG: Processing {len(lines)} lines...")
+    
+    for i, line in enumerate(lines):
+        if i < 5: continue # Skip only top header garbage
+        
+        # Simple split, no fancy filtering
+        parts = line.split('|')
+        
+        # Must have at least 5 parts
+        if len(parts) < 5:
+            continue
+            
+        cik = parts[0].strip()
+        company_name = parts[1].strip()
+        form_type = parts[2].strip()
+        date_filed = parts[3].strip()
+        filename = parts[4].strip()
+        
+        if form_type == 'D' or form_type == 'D/A':
+            # Parse accession from filename
+            # filename looks like: edgar/data/1000230/0001437749-23-034978.txt
+            path_match = re.match(r'edgar/data/(\d+)/(\S+)/(\S+)', filename)
             if path_match:
                 accession = path_match.group(2)
                 primary_doc = path_match.group(3)
-                raw_xml_url = f"https://www.sec.gov/{filename}"
+                raw_xml_url = f"https://www.sec.gov/Archives/{filename}"
                 entries.append({
                     'cik': cik,
                     'company_name': company_name,
-                    'filing_date': filing_date_str,
+                    'filing_date': date_filed,
                     'accession': accession,
                     'filename': primary_doc,
                     'raw_xml_url': raw_xml_url
@@ -128,18 +141,11 @@ def process_daily(session, year, quarter, date_str):
     
     try:
         resp = requests.get(url, headers=HEADERS)
-        
-        # --- X-RAY VISION: PRINT WHAT WE RECEIVED ---
-        print(f"📡 Server Status: {resp.status_code}")
-        print("--- START OF SERVER RESPONSE (First 300 chars) ---")
-        print(resp.text[:300])
-        print("--- END OF PREVIEW ---")
-        # -------------------------------------------
-
         if resp.status_code == 200:
             lines = resp.text.splitlines()
             entries = parse_index_lines(lines)
             print(f"🔎 Found {len(entries)} Form D entries. Processing...")
+            
             count = 0
             for entry in entries:
                 data = download_and_parse_xml(entry['cik'], entry['accession'], entry['filename'])
@@ -148,7 +154,7 @@ def process_daily(session, year, quarter, date_str):
                 time.sleep(0.15) 
             print(f"🚀 Batch Complete: Added {count} new leads.")
         else:
-            print(f"❌ Failed to download index.")
+            print(f"❌ Failed to download index (Status {resp.status_code}).")
             
     except Exception as e:
         print(f"🔥 Download Error: {e}")
