@@ -18,9 +18,21 @@ app = FastAPI(title="Nexthor Ai Form D Burn API", description="Private raises wi
 # CORS for OpenBB/Bubble
 app.add_middleware(CORSMiddleware, allow_origins=["https://pro.openbb.co", "*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Supabase/SQLite DB (env var)
-DB_URL = os.getenv("DB_URL", "sqlite:///C:/Users/super/Desktop/Nexthor Ai/reg_d_treasure.db")
-engine = create_engine(DB_URL)
+# --- DATABASE CONNECTION FIX (The Critical Update) ---
+DB_URL = os.getenv("DB_URL")
+
+# Fallback for local testing if Env Var is missing
+if not DB_URL:
+    print("⚠️ WARNING: No DB_URL found. Using local SQLite.")
+    # Keep your local path for testing on your machine
+    DB_URL = "sqlite:///C:/Users/super/Desktop/Nexthor Ai/reg_d_treasure.db"
+
+# Fix: Add pool_pre_ping=True to handle Supabase disconnects
+if "sqlite" in DB_URL:
+    engine = create_engine(DB_URL)
+else:
+    # Production: Ensure SSL is required and pool recycling is active
+    engine = create_engine(DB_URL, pool_pre_ping=True, pool_recycle=300)
 
 CACHE_DURATION = 5 * 60  # 5 min cache
 cache_store = {}
@@ -28,12 +40,13 @@ cache_store = {}
 def create_cache_key(func_name: str, **kwargs) -> str:
     key_parts = [func_name]
     for k, v in sorted(kwargs.items()):
-        key_parts.append(f"{k}={v}")
+        key_parts.append(f"{k}={str(v)}") # Ensure value is string
     return hashlib.md5("|".join(key_parts).encode()).hexdigest()
 
 def cache_response(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
+        # Extract query params from kwargs for cache key
         cache_key = create_cache_key(func.__name__, **kwargs)
         if cache_key in cache_store:
             data, timestamp = cache_store[cache_key]
@@ -48,39 +61,71 @@ def cache_response(func):
 @app.get("/latest_filings")
 @cache_response
 def latest_filings(limit: int = Query(10, ge=1, le=100)):
+    # Fix: Explicitly select columns to match DataFrame expectations if needed
     query = text("SELECT * FROM filings ORDER BY filing_date DESC LIMIT :limit")
-    df = pd.read_sql(query, engine, params={"limit": limit})
-    return df.to_dict(orient="records")  # Paginated raises for due diligence
+    try:
+        df = pd.read_sql(query, engine, params={"limit": limit})
+        # Handle empty DB case gracefully
+        if df.empty:
+            return []
+        # Convert date objects to string for JSON serialization
+        if 'filing_date' in df.columns:
+            df['filing_date'] = df['filing_date'].astype(str)
+        return df.to_dict(orient="records")
+    except Exception as e:
+        print(f"Database Error: {e}")
+        return {"error": "Database connection failed", "details": str(e)}
 
 @app.get("/high_burn_leads")
 @cache_response
 def high_burn_leads(min_score: int = Query(70, ge=0, le=100), industry: str = None):
-    query = text("SELECT * FROM filings WHERE ai_score >= :min_score")
+    query_str = "SELECT * FROM filings WHERE ai_score >= :min_score"
     params = {"min_score": min_score}
+    
     if industry:
-        query = text(query.text + " AND company_name LIKE :industry")
+        query_str += " AND company_name ILIKE :industry" # Postgres ILIKE for case-insensitive
         params["industry"] = f"%{industry}%"
-    df = pd.read_sql(query, engine, params=params)
-    return df.to_dict(orient="records")  # Moat: Scored leads for founder outreach
+        
+    query = text(query_str)
+    try:
+        df = pd.read_sql(query, engine, params=params)
+        if df.empty:
+            return []
+        if 'filing_date' in df.columns:
+            df['filing_date'] = df['filing_date'].astype(str)
+        return df.to_dict(orient="records")
+    except Exception as e:
+        print(f"Database Error: {e}")
+        return {"error": "Database connection failed"}
 
 @app.get("/security_types_pie")
 @cache_response
 def security_pie(year: str = "all"):
+    # Fix: Adjusted query for Postgres compatibility
     query = text("""
-                        SELECT CASE 
-                        WHEN raise_amount LIKE '%K' THEN 'Small Raise (<$1M)' 
-                        WHEN raise_amount LIKE '%M' THEN 'Medium Raise ($1M-$10M)' 
-                        ELSE 'Large Raise (>$10M)' END as type, COUNT(*) as count FROM filings 
-                        GROUP BY CASE 
-                        WHEN raise_amount LIKE '%K' THEN 'Small Raise (<$1M)' 
-                        WHEN raise_amount LIKE '%M' THEN 'Medium Raise ($1M-$10M)' 
-                        ELSE 'Large Raise (>$10M)' END
-                """)
-    df = pd.read_sql(query, engine)
-    fig = px.pie(df, names='type', values='count', title="Equity/Debt/Fund Breakdown")
-    img_bytes = fig.to_image(format="png")
-    encoded = base64.b64encode(img_bytes).decode()
-    return {"image_b64": encoded}  # Embeddable chart
+        SELECT 
+            CASE 
+                WHEN raise_amount LIKE '%K' THEN 'Small Raise (<$1M)' 
+                WHEN raise_amount LIKE '%M' THEN 'Medium Raise ($1M-$10M)' 
+                ELSE 'Large Raise (>$10M)' 
+            END as type, 
+            COUNT(*) as count 
+        FROM filings 
+        GROUP BY 1
+    """)
+    try:
+        df = pd.read_sql(query, engine)
+        if df.empty:
+            # Return a placeholder if no data exists yet
+            df = pd.DataFrame([{'type': 'No Data', 'count': 1}])
+            
+        fig = px.pie(df, names='type', values='count', title="Equity/Debt/Fund Breakdown")
+        img_bytes = fig.to_image(format="png")
+        encoded = base64.b64encode(img_bytes).decode()
+        return {"image_b64": encoded}
+    except Exception as e:
+        print(f"Viz Error: {e}")
+        return {"error": "Visualization failed"}
 
 # OpenBB Widgets
 @app.get("/widgets.json")
