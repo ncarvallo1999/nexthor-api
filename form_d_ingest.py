@@ -50,14 +50,10 @@ def parse_index_lines(lines):
     print(f"DEBUG: Processing {len(lines)} lines...")
     
     for i, line in enumerate(lines):
-        if i < 5: continue # Skip only top header garbage
+        if i < 5: continue # Skip header
         
-        # Simple split, no fancy filtering
         parts = line.split('|')
-        
-        # Must have at least 5 parts
-        if len(parts) < 5:
-            continue
+        if len(parts) < 5: continue
             
         cik = parts[0].strip()
         company_name = parts[1].strip()
@@ -66,30 +62,37 @@ def parse_index_lines(lines):
         filename = parts[4].strip()
         
         if form_type == 'D' or form_type == 'D/A':
-            # Parse accession from filename
-            # filename looks like: edgar/data/1000230/0001437749-23-034978.txt
-            path_match = re.match(r'edgar/data/(\d+)/(\S+)/(\S+)', filename)
+            # Regex Fix: Match 2 slashes "edgar/data/CIK/FILENAME"
+            path_match = re.match(r'edgar/data/(\d+)/(.+)', filename)
             if path_match:
-                accession = path_match.group(2)
-                primary_doc = path_match.group(3)
-                raw_xml_url = f"https://www.sec.gov/Archives/{filename}"
+                # Filename is like: 0001437749-23-034978.txt
+                txt_name = path_match.group(2)
+                # Accession is filename without .txt
+                accession = txt_name.replace('.txt', '')
+                # SEC XML folder usually removes dashes from accession
+                accession_no_dashes = accession.replace('-', '')
+                
+                # Construct the likely XML URL
+                raw_xml_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_no_dashes}/primary_doc.xml"
+                
                 entries.append({
                     'cik': cik,
                     'company_name': company_name,
                     'filing_date': date_filed,
-                    'accession': accession,
-                    'filename': primary_doc,
                     'raw_xml_url': raw_xml_url
                 })
     return entries
 
-def download_and_parse_xml(cik, accession, primary_doc):
-    url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{primary_doc}"
+def download_and_parse_xml(entry):
+    url = entry['raw_xml_url']
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
         if resp.status_code == 200:
             parsed = parse_form_d_xml(resp.content, url)
-            parsed['cik'] = cik
+            parsed['cik'] = entry['cik']
+            # Fallback if date missing in XML, use index date
+            if not parsed.get('filing_date') and entry['filing_date']:
+                 parsed['filing_date'] = datetime.datetime.strptime(entry['filing_date'], '%Y%m%d').date()
             return parsed
         return None
     except Exception as e:
@@ -148,7 +151,7 @@ def process_daily(session, year, quarter, date_str):
             
             count = 0
             for entry in entries:
-                data = download_and_parse_xml(entry['cik'], entry['accession'], entry['filename'])
+                data = download_and_parse_xml(entry)
                 if data and insert_if_new(session, data):
                     count += 1
                 time.sleep(0.15) 
@@ -161,26 +164,3 @@ def process_daily(session, year, quarter, date_str):
 
 def daily_update():
     session = SessionLocal()
-    try:
-        test_date_str = os.getenv('TEST_DATE') 
-        if test_date_str:
-            print(f"🧪 TEST MODE: Using {test_date_str}")
-            target_date = datetime.datetime.strptime(test_date_str, '%Y-%m-%d').date()
-        else:
-            target_date = datetime.date.today() - datetime.timedelta(days=1)
-        
-        year = target_date.year
-        month = target_date.month
-        quarter = ((month - 1) // 3) + 1
-        date_str = target_date.strftime('%Y%m%d')
-        
-        process_daily(session, year, quarter, date_str)
-        session.commit()
-    except Exception as e:
-        session.rollback()
-        print(f"🔥 Critical Error: {e}")
-    finally:
-        session.close()
-
-if __name__ == "__main__":
-    daily_update()
